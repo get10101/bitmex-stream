@@ -2,6 +2,7 @@ use anyhow::Result;
 use bitmex_stream::Credentials;
 use bitmex_stream::Network;
 use futures::TryStreamExt;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -16,6 +17,7 @@ async fn main() -> Result<()> {
             api_key: "some_api_key".to_string(),
             secret: "some_secret".to_string(),
         },
+        Duration::from_secs(10),
     );
 
     while let Some(result) = stream.try_next().await? {

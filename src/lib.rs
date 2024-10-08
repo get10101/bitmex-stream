@@ -14,7 +14,12 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
+use tokio_tungstenite::MaybeTlsStream;
+use tokio_tungstenite::WebSocketStream;
 use tracing::Instrument;
 use url::Url;
 
@@ -25,8 +30,9 @@ use url::Url;
 pub fn subscribe<const N: usize>(
     topics: [String; N],
     network: Network,
+    timeout: Duration,
 ) -> impl Stream<Item = Result<String>> + Unpin {
-    subscribe_impl(topics, network, None)
+    subscribe_impl(topics, network, None, timeout)
 }
 
 /// Connects to the BitMex websocket API with authentication
@@ -38,8 +44,9 @@ pub fn subscribe_with_credentials<const N: usize>(
     topics: [String; N],
     network: Network,
     credentials: Credentials,
+    timeout: Duration,
 ) -> impl Stream<Item = Result<String>> + Unpin {
-    subscribe_impl(topics, network, Some(credentials))
+    subscribe_impl(topics, network, Some(credentials), timeout)
 }
 
 /// Connects to the BitMex websocket API, subscribes to the specified topics (comma-separated) and
@@ -51,6 +58,7 @@ fn subscribe_impl<const N: usize>(
     topics: [String; N],
     network: Network,
     credentials: Option<Credentials>,
+    timeout: Duration,
 ) -> impl Stream<Item = Result<String>> + Unpin {
     let url = network.to_url();
     let url = format!("wss://{url}/realtime");
@@ -58,7 +66,7 @@ fn subscribe_impl<const N: usize>(
     let stream = stream! {
         tracing::debug!("Connecting to BitMex realtime API");
 
-        let (mut connection, _) = tokio_tungstenite::connect_async(url.clone())
+        let (mut connection, _) = connect_async(url.clone(), timeout)
             .await.context("Could not connect to websocket")?;
 
         tracing::info!("Connected to BitMex realtime API");
@@ -139,6 +147,42 @@ fn subscribe_impl<const N: usize>(
     };
 
     stream.boxed()
+}
+
+#[tracing::instrument]
+async fn connect_async<R>(
+    request: R,
+    timeout: Duration,
+) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response), tungstenite::error::Error>
+where
+    R: std::fmt::Debug + IntoClientRequest + Unpin + Clone,
+{
+    let mut delay = 500;
+    loop {
+        match tokio::time::timeout(
+            timeout,
+            tokio_tungstenite::connect_async(request.clone())
+                .instrument(tracing::info_span!("tungstenite_connect_async")),
+        )
+        .await
+        {
+            Err(e) => {
+                tracing::warn!(
+                  error=?e, "timeout while trying to connect to websocket, retrying in {}", delay
+                );
+            }
+            Ok(result) => match result {
+                Ok(r) => {
+                    return Ok(r);
+                }
+                Err(e) => {
+                    tracing::warn!(error=?e, "websocket connection error, retrying in {}", delay);
+                }
+            },
+        }
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        delay = std::cmp::min(8000, delay * 2);
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
